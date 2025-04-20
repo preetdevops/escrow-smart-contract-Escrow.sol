@@ -1,108 +1,77 @@
-//SPDX-License-Identifier:MIT
-
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.10;
 
-contract Escrow {
-    enum EscrowStatus { Created, Locked, Released, Refunded, Dispute }
+contract SmartEscrow {
+    enum Status { Initialized, Locked, Completed, Refunded, InDispute }
 
-    struct EscrowTransaction {
-        address buyer;
-        address seller;
-        uint256 amount;
-        EscrowStatus status;
+    struct Deal {
+        address client;
+        address provider;
+        uint256 value;
+        Status phase;
     }
 
-    address public arbitrator;
-    uint256 public transactionCounter;
-    mapping (uint256 => EscrowTransaction) private escrowTransactions;
+    address public supervisor;
+    uint256 public dealCount;
+    mapping(uint256 => Deal) private deals;
 
-    event EscrowCreated(uint256 indexed transactionId, address indexed buyer, address indexed seller, uint256 amount);
-    event EscrowLocked(uint256 indexed transactionId);
-    event EscrowReleased(uint256 indexed transactionId);
-    event EscrowRefunded(uint256 indexed transactionId);
-    event EscrowDisputed(uint256 indexed transactionId);
-    event EscrowResolved(uint256 indexed transactionId, address indexed resolver, bool releasedFunds);
+    event NewDeal(uint256 indexed id, address indexed client, address indexed provider, uint256 value);
+    event DealLocked(uint256 indexed id);
+    event DealCompleted(uint256 indexed id);
+    event DealRefunded(uint256 indexed id);
+    event DealDisputed(uint256 indexed id);
+    event DisputeResolved(uint256 indexed id, bool favorProvider);
 
-    modifier onlyArbitrator() {
-        require(msg.sender == arbitrator, "Only the arbitrator can perform this action.");
+    modifier onlySupervisor() {
+        require(msg.sender == supervisor, "Unauthorized");
         _;
     }
 
-    modifier inStatus(uint256 transactionId, EscrowStatus status) {
-        require(escrowTransactions[transactionId].status == status, "Transaction is not in the required state.");
+    modifier atPhase(uint256 id, Status expected) {
+        require(deals[id].phase == expected, "Invalid status");
         _;
     }
 
     constructor() {
-        arbitrator = msg.sender;
-        transactionCounter = 0;
+        supervisor = msg.sender;
     }
 
-    function createEscrow(address buyer, address seller) external payable onlyArbitrator {
-        uint256 transactionId = transactionCounter;
-        transactionCounter++;
-
-        escrowTransactions[transactionId] = EscrowTransaction({
-            buyer: buyer,
-            seller: seller,
-            amount: msg.value,
-            status: EscrowStatus.Created
-        });
-
-        emit EscrowCreated(transactionId, buyer, seller, msg.value);
+    function initiateDeal(address client, address provider) external payable onlySupervisor {
+        uint256 id = dealCount++;
+        deals[id] = Deal(client, provider, msg.value, Status.Initialized);
+        emit NewDeal(id, client, provider, msg.value);
     }
 
-    function lockEscrow(uint256 transactionId) external onlyArbitrator inStatus(transactionId, EscrowStatus.Created) {
-        escrowTransactions[transactionId].status = EscrowStatus.Locked;
-
-        emit EscrowLocked(transactionId);
+    function lockDeal(uint256 id) external onlySupervisor atPhase(id, Status.Initialized) {
+        deals[id].phase = Status.Locked;
+        emit DealLocked(id);
     }
 
-    function releaseEscrow(uint256 transactionId) external onlyArbitrator inStatus(transactionId, EscrowStatus.Locked) {
-        escrowTransactions[transactionId].status = EscrowStatus.Released;
-
-        address payable seller = payable(escrowTransactions[transactionId].seller);
-        uint256 amount = escrowTransactions[transactionId].amount;
-
-        seller.transfer(amount);
-
-        emit EscrowReleased(transactionId);
+    function completeDeal(uint256 id) external onlySupervisor atPhase(id, Status.Locked) {
+        deals[id].phase = Status.Completed;
+        payable(deals[id].provider).transfer(deals[id].value);
+        emit DealCompleted(id);
     }
 
-    function refundEscrow(uint256 transactionId) external onlyArbitrator inStatus(transactionId, EscrowStatus.Locked) {
-        escrowTransactions[transactionId].status = EscrowStatus.Refunded;
-
-        address payable buyer = payable(escrowTransactions[transactionId].buyer);
-        uint256 amount = escrowTransactions[transactionId].amount;
-
-        buyer.transfer(amount);
-
-        emit EscrowRefunded(transactionId);
+    function refundDeal(uint256 id) external onlySupervisor atPhase(id, Status.Locked) {
+        deals[id].phase = Status.Refunded;
+        payable(deals[id].client).transfer(deals[id].value);
+        emit DealRefunded(id);
     }
 
-    function initiateDispute(uint256 transactionId) external onlyArbitrator inStatus(transactionId, EscrowStatus.Locked) {
-        escrowTransactions[transactionId].status = EscrowStatus.Dispute;
-
-        emit EscrowDisputed(transactionId);
+    function disputeDeal(uint256 id) external onlySupervisor atPhase(id, Status.Locked) {
+        deals[id].phase = Status.InDispute;
+        emit DealDisputed(id);
     }
 
-    function resolveDispute(uint256 transactionId, bool releaseFunds) external onlyArbitrator inStatus(transactionId, EscrowStatus.Dispute) {
-        escrowTransactions[transactionId].status = EscrowStatus.Released;
-
-        address payable seller = payable(escrowTransactions[transactionId].seller);
-        address payable buyer = payable(escrowTransactions[transactionId].buyer);
-        uint256 amount = escrowTransactions[transactionId].amount;
-
-        if (releaseFunds) {
-            seller.transfer(amount);
-        } else {
-            buyer.transfer(amount);
-        }
-
-        emit EscrowResolved(transactionId, msg.sender, releaseFunds);
+    function resolveDispute(uint256 id, bool payProvider) external onlySupervisor atPhase(id, Status.InDispute) {
+        deals[id].phase = Status.Completed;
+        address payable recipient = payProvider ? payable(deals[id].provider) : payable(deals[id].client);
+        recipient.transfer(deals[id].value);
+        emit DisputeResolved(id, payProvider);
     }
 
-    function getEscrowStatus(uint256 transactionId) external view returns (EscrowStatus) {
-        return escrowTransactions[transactionId].status;
+    function checkStatus(uint256 id) external view returns (Status) {
+        return deals[id].phase;
     }
 }
